@@ -1,36 +1,42 @@
 import { NextResponse } from 'next/server';
-import { getGeminiModel } from '@/lib/gemini';
+import { getGeminiModel, withGeminiRetry, isQuotaError } from '@/lib/gemini';
 
 export async function POST(request: Request) {
   try {
-    const { image, lang = 'en' } = await request.json();
+    const body = await request.json().catch(() => null);
 
-    if (!image) {
-      return NextResponse.json({ error: 'Image is required in base64 format' }, { status: 400 });
+    if (!body || !body.image) {
+      return NextResponse.json(
+        { error: 'Image is required in base64 format' },
+        { status: 400 }
+      );
     }
+
+    const { image, lang = 'en' } = body as { image: string; lang?: string };
 
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json(
-        { error: 'Gemini API key is not configured' },
-        { status: 500 }
+        { error: 'AI service is currently unavailable. Please try again later.' },
+        { status: 503 }
       );
     }
 
     const matches = image.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
     if (!matches || matches.length !== 3) {
-      return NextResponse.json({ error: 'Invalid base64 image string' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Invalid image format. Please upload a valid image.' },
+        { status: 400 }
+      );
     }
 
     const mimeType = matches[1];
     const base64Data = matches[2];
 
-    const model = getGeminiModel('gemini-2.5-flash');
-
     const languageMap: Record<string, string> = {
-      'en': 'English',
-      'hi': 'Hindi',
-      'te': 'Telugu',
-      'ta': 'Tamil'
+      en: 'English',
+      hi: 'Hindi',
+      te: 'Telugu',
+      ta: 'Tamil',
     };
     const targetLang = languageMap[lang] || 'English';
 
@@ -55,39 +61,66 @@ export async function POST(request: Request) {
       }
     `;
 
-    const result = await model.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: prompt },
-          { inlineData: { data: base64Data, mimeType: mimeType } }
-        ]
-      }],
-      generationConfig: {
-        responseMimeType: "application/json"
-      }
-    });
+    const model = getGeminiModel('gemini-2.5-flash');
+
+    const result = await withGeminiRetry(() =>
+      model.generateContent({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              { inlineData: { data: base64Data, mimeType: mimeType } },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+        },
+      })
+    );
 
     const responseText = result.response.text();
-    let analysisData;
+
+    let analysisData: unknown;
     try {
       analysisData = JSON.parse(responseText);
-      return NextResponse.json(analysisData);
-    } catch (parseError) {
-      console.error('Failed to parse Gemini response directly:', responseText);
-      // Fallback regex if somehow response is wrapped
+    } catch {
+      // Fallback: extract JSON block if the model wrapped the response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        analysisData = JSON.parse(jsonMatch[0]);
-        return NextResponse.json(analysisData);
+        try {
+          analysisData = JSON.parse(jsonMatch[0]);
+        } catch {
+          console.error('[analyze] Failed to parse extracted JSON block:', jsonMatch[0]);
+          return NextResponse.json(
+            { error: 'AI returned an unexpected response. Please try again.' },
+            { status: 502 }
+          );
+        }
+      } else {
+        console.error('[analyze] No JSON found in Gemini response:', responseText);
+        return NextResponse.json(
+          { error: 'AI returned an unexpected response. Please try again.' },
+          { status: 502 }
+        );
       }
-      throw new Error('Failed to extract JSON from response');
     }
 
-  } catch (error: any) {
-    console.error('Error analyzing image:', error.message || error);
+    return NextResponse.json(analysisData);
+  } catch (error: unknown) {
+    const message = (error as any)?.message ?? String(error);
+    console.error('[analyze] Error analyzing image:', message);
+
+    if (isQuotaError(error)) {
+      return NextResponse.json(
+        { error: 'AI service is currently busy. Please try again shortly.' },
+        { status: 429 }
+      );
+    }
+
     return NextResponse.json(
-      { error: 'Failed to analyze crop image' },
+      { error: 'AI service is currently busy. Please try again shortly.' },
       { status: 500 }
     );
   }

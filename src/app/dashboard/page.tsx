@@ -18,41 +18,55 @@ export default function DashboardPage() {
   const [locationName, setLocationName] = useState("California (Default)");
   const [recentScans, setRecentScans] = useState<any[]>([]);
 
+  const fetchWeather = (lat?: number, lon?: number) => {
+    const url = lat && lon ? `/api/weather?lat=${lat}&lon=${lon}` : '/api/weather';
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (data && typeof data.temperature !== 'undefined') {
+          setWeather(data);
+        }
+      })
+      .catch((err) => {
+        console.error('[dashboard] Weather fetch failed:', err?.message ?? err);
+        // Leave weather as null — UI already renders '...' gracefully
+      });
+  };
+
   useEffect(() => {
     setMounted(true);
-    
-    // Load history
-    const historyStr = localStorage.getItem('cropScanHistory');
-    if (historyStr) {
-      setRecentScans(JSON.parse(historyStr));
-    } else {
+
+    // Load scan history safely
+    try {
+      const historyStr = localStorage.getItem('cropScanHistory');
+      if (historyStr) {
+        setRecentScans(JSON.parse(historyStr));
+      } else {
+        setRecentScans([
+          { id: 1, crop: 'No scans yet', status: 'Healthy', time: 'Just now', color: 'text-emerald-500', bg: 'bg-emerald-50' },
+        ]);
+      }
+    } catch {
       setRecentScans([
-        { id: 1, crop: 'No scans yet', status: 'Healthy', time: 'Just now', color: 'text-emerald-500', bg: 'bg-emerald-50' }
+        { id: 1, crop: 'No scans yet', status: 'Healthy', time: 'Just now', color: 'text-emerald-500', bg: 'bg-emerald-50' },
       ]);
     }
 
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          const lat = position.coords.latitude;
-          const lon = position.coords.longitude;
-          setLocationName("Your Farm");
-          fetch(`/api/weather?lat=${lat}&lon=${lon}`)
-            .then(res => res.json())
-            .then(data => setWeather(data))
-            .catch(err => console.error(err));
+          setLocationName('Your Farm');
+          fetchWeather(position.coords.latitude, position.coords.longitude);
         },
-        () => {
-          fetch('/api/weather')
-            .then(res => res.json())
-            .then(data => setWeather(data));
-        }
+        () => fetchWeather()
       );
     } else {
-      fetch('/api/weather')
-        .then(res => res.json())
-        .then(data => setWeather(data));
+      fetchWeather();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const healthData = [
